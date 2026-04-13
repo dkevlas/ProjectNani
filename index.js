@@ -33,6 +33,9 @@ const CHROME_EXECUTABLE_PATH =
 let qrImageBase64 = null;
 let isReady = false;
 let botActive = true;
+let lastInitError = null;
+let initInFlight = false;
+let initAttempts = 0;
 
 // Buffer de mensajes pendientes: { texts: [], audioBase64s: [], timer }
 let pending = { texts: [], audioBase64s: [], timer: null };
@@ -52,8 +55,6 @@ function createWhatsAppClient() {
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
-        "--no-zygote",
-        "--single-process",
       ],
     },
   });
@@ -76,6 +77,75 @@ function resolveChromeExecutablePath() {
   return undefined;
 }
 
+function logPuppeteerDebug(label) {
+  const envKeys = [
+    "NODE_ENV",
+    "NODE_VERSION",
+    "PUPPETEER_CACHE_DIR",
+    "PUPPETEER_EXECUTABLE_PATH",
+    "PUPPETEER_SKIP_DOWNLOAD",
+    "CHROME_BIN",
+    "CHROME_PATH",
+  ];
+
+  const envSnapshot = {};
+  for (const k of envKeys) envSnapshot[k] = process.env[k];
+
+  console.log("pptr-debug:", {
+    label,
+    node: process.version,
+    platform: `${process.platform}/${process.arch}`,
+    cwd: process.cwd(),
+    dir: __dirname,
+    chromeExecutablePath: CHROME_EXECUTABLE_PATH,
+    chromePathExists: CHROME_EXECUTABLE_PATH ? safeExists(CHROME_EXECUTABLE_PATH) : false,
+    env: envSnapshot,
+    cacheDirExists: safeExists(path.join(__dirname, ".cache")),
+    cachePuppeteerDirExists: safeExists(path.join(__dirname, ".cache", "puppeteer")),
+    cacheDirList: safeListDir(path.join(__dirname, ".cache")),
+    cachePuppeteerDirList: safeListDir(path.join(__dirname, ".cache", "puppeteer")),
+    puppeteerPackage: safeReadJsonVersion("puppeteer"),
+    puppeteerCorePackage: safeReadJsonVersion("puppeteer-core"),
+    puppeteerExecutablePath: safePuppeteerExecutablePath(),
+  });
+}
+
+function safeExists(p) {
+  try {
+    return fs.existsSync(p);
+  } catch {
+    return false;
+  }
+}
+
+function safeListDir(dir) {
+  try {
+    return fs.readdirSync(dir).slice(0, 50);
+  } catch (e) {
+    return `error: ${String(e?.message || e || "")}`;
+  }
+}
+
+function safeReadJsonVersion(pkgName) {
+  try {
+    // eslint-disable-next-line import/no-dynamic-require, global-require
+    return require(`${pkgName}/package.json`).version;
+  } catch (e) {
+    return `error: ${String(e?.message || e || "")}`;
+  }
+}
+
+function safePuppeteerExecutablePath() {
+  try {
+    // eslint-disable-next-line import/no-dynamic-require, global-require
+    const puppeteer = require("puppeteer");
+    if (typeof puppeteer.executablePath === "function") return puppeteer.executablePath();
+    return "n/a";
+  } catch (e) {
+    return `error: ${String(e?.message || e || "")}`;
+  }
+}
+
 function registerWhatsAppHandlers(client) {
   client.on("qr", async (qr) => {
     console.log("QR generado — abre la URL en el navegador para escanearlo");
@@ -85,19 +155,24 @@ function registerWhatsAppHandlers(client) {
   client.on("ready", () => {
     isReady = true;
     qrImageBase64 = null;
+    lastInitError = null;
+    initAttempts = 0;
     console.log("✅ WhatsApp conectado y listo");
   });
 
   client.on("auth_failure", (message) => {
     isReady = false;
     qrImageBase64 = null;
+    lastInitError = `auth_failure: ${String(message || "")}`;
     console.log("❌ Auth failure:", message);
   });
 
   client.on("disconnected", (reason) => {
     isReady = false;
     qrImageBase64 = null;
+    lastInitError = `disconnected: ${String(reason || "")}`;
     console.log("❌ Desconectado:", reason);
+    scheduleClientInitialize("disconnected");
   });
 
   client.on("message", handleIncomingMessage);
@@ -274,6 +349,8 @@ app.get("/status", (req, res) => {
     ready: isReady,
     botActive,
     hasQr: Boolean(qrImageBase64),
+    initAttempts,
+    lastInitError,
   };
   res.status(isReady ? 200 : 503).json(payload);
 });
@@ -308,8 +385,43 @@ function pageHTML(title, content, ready) {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🌐 Servidor en puerto ${PORT}`));
-client.initialize();
+process.on("unhandledRejection", (reason) => {
+  lastInitError = `unhandledRejection: ${String(reason || "")}`;
+  console.error("unhandledRejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  lastInitError = `uncaughtException: ${String(err?.message || err || "")}`;
+  console.error("uncaughtException:", err);
+});
+
+scheduleClientInitialize("boot");
 startKeepAlive();
+
+function scheduleClientInitialize(trigger) {
+  if (initInFlight) return;
+  initInFlight = true;
+  initAttempts += 1;
+  const attemptNumber = initAttempts;
+
+  const delayMs = Math.min(60_000, Math.max(1_000, attemptNumber * 5_000));
+  setTimeout(async () => {
+    try {
+      console.log(`🔄 Inicializando WhatsApp (intento ${attemptNumber}) — trigger: ${trigger}`);
+      logPuppeteerDebug(`before-initialize#${attemptNumber}`);
+      await client.initialize();
+      lastInitError = null;
+    } catch (e) {
+      lastInitError = `initialize failed: ${String(e?.message || e || "")}`;
+      console.error("❌ client.initialize() falló:", e?.stack || e?.message || e);
+      logPuppeteerDebug(`initialize-error#${attemptNumber}`);
+      initInFlight = false;
+      scheduleClientInitialize("retry");
+      return;
+    } finally {
+      initInFlight = false;
+    }
+  }, delayMs);
+}
 
 function startKeepAlive() {
   if (!KEEP_ALIVE_URL) return;
