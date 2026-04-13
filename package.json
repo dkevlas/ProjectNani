@@ -4,7 +4,6 @@
   "description": "Bot de WhatsApp con Gemini AI — texto + audios + debounce",
   "main": "index.js",
   "scripts": {
-    "postinstall": "npx puppeteer browsers install chrome",
     "start": "node index.js"
   },
   "dependencies": {
