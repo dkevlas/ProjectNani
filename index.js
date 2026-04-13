@@ -11,7 +11,7 @@ require('dotenv').config()
 const app = express();
 const api_key = process.env.GEMINI_API_KEY
 const genAI = new GoogleGenerativeAI(api_key);
-const wait = 5
+const wait = 10
 
 // ── Configura aquí el número de tu amiga ─────────────────────────────────
 // Formato: código de país + número, sin +, sin espacios. Ej: "5491123456789"
@@ -55,6 +55,19 @@ function createWhatsAppClient() {
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--disable-background-timer-throttling",
+        "--disable-renderer-backgrounding",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-sync",
+        "--disable-translate",
+        "--metrics-recording-only",
+        "--mute-audio",
+        "--hide-scrollbars",
+        "--disable-features=TranslateUI,BackForwardCache,AcceptCHFrame,MediaRouter",
       ],
     },
   });
@@ -165,6 +178,8 @@ function registerWhatsAppHandlers(client) {
     qrImageBase64 = null;
     lastInitError = `auth_failure: ${String(message || "")}`;
     console.log("❌ Auth failure:", message);
+    safeDestroyClient("auth_failure");
+    scheduleClientInitialize("auth_failure");
   });
 
   client.on("disconnected", (reason) => {
@@ -172,10 +187,21 @@ function registerWhatsAppHandlers(client) {
     qrImageBase64 = null;
     lastInitError = `disconnected: ${String(reason || "")}`;
     console.log("❌ Desconectado:", reason);
+    safeDestroyClient("disconnected");
     scheduleClientInitialize("disconnected");
   });
 
   client.on("message", handleIncomingMessage);
+}
+
+function safeDestroyClient(trigger) {
+  try {
+    Promise.resolve(client.destroy())
+      .then(() => console.log(`🧹 client.destroy() ok — trigger: ${trigger}`))
+      .catch((e) => console.error(`🧹 client.destroy() error — trigger: ${trigger}:`, e?.message || e));
+  } catch (e) {
+    console.error(`🧹 client.destroy() threw — trigger: ${trigger}:`, e?.message || e);
+  }
 }
 
 async function handleIncomingMessage(msg) {
@@ -407,13 +433,13 @@ function scheduleClientInitialize(trigger) {
   setTimeout(async () => {
     try {
       console.log(`🔄 Inicializando WhatsApp (intento ${attemptNumber}) — trigger: ${trigger}`);
-      logPuppeteerDebug(`before-initialize#${attemptNumber}`);
+      if (process.env.PPTR_DEBUG === "1") logPuppeteerDebug(`before-initialize#${attemptNumber}`);
       await client.initialize();
       lastInitError = null;
     } catch (e) {
       lastInitError = `initialize failed: ${String(e?.message || e || "")}`;
       console.error("❌ client.initialize() falló:", e?.stack || e?.message || e);
-      logPuppeteerDebug(`initialize-error#${attemptNumber}`);
+      if (process.env.PPTR_DEBUG === "1") logPuppeteerDebug(`initialize-error#${attemptNumber}`);
       initInFlight = false;
       scheduleClientInitialize("retry");
       return;
