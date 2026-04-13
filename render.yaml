@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: whatsapp-ai-bot
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false        # lo escribes tú en el dashboard de Render
+      - key: FRIEND_NUMBER
+        sync: false        # ej: 5491123456789 (sin + ni espacios)
+    disk:
+      name: wwebjs-auth
+      mountPath: /tmp/wwebjs_auth
+      sizeGB: 1
