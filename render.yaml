@@ -3,7 +3,7 @@ services:
     name: whatsapp-ai-bot
     env: node
     plan: free
-    buildCommand: npm install
+    buildCommand: apt-get update && apt-get install -y chromium && npm install
     startCommand: node index.js
     envVars:
       - key: GEMINI_API_KEY
