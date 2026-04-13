@@ -24,6 +24,11 @@ const MODEL_AUDIO_TRANSCRIBE = process.env.GEMINI_TRANSCRIBE_MODEL || MODEL_TEXT
 const WWEBJS_AUTH_PATH = process.env.WWEBJS_AUTH_PATH || "/tmp/wwebjs_auth";
 const KEEP_ALIVE_URL = process.env.KEEP_ALIVE_URL;
 const KEEP_ALIVE_INTERVAL_MS = Number(process.env.KEEP_ALIVE_INTERVAL_MS || 10 * 60 * 1000);
+const CHROME_EXECUTABLE_PATH =
+  process.env.PUPPETEER_EXECUTABLE_PATH ||
+  process.env.CHROME_BIN ||
+  process.env.CHROME_PATH ||
+  resolveChromeExecutablePath();
 
 let qrImageBase64 = null;
 let isReady = false;
@@ -41,6 +46,7 @@ function createWhatsAppClient() {
     authStrategy: new LocalAuth({ dataPath: WWEBJS_AUTH_PATH }),
     puppeteer: {
       headless: true,
+      ...(CHROME_EXECUTABLE_PATH ? { executablePath: CHROME_EXECUTABLE_PATH } : {}),
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -51,6 +57,23 @@ function createWhatsAppClient() {
       ],
     },
   });
+}
+
+function resolveChromeExecutablePath() {
+  const candidates = [
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {}
+  }
+
+  return undefined;
 }
 
 function registerWhatsAppHandlers(client) {
