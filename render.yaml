@@ -10,6 +10,10 @@ services:
         sync: false        # lo escribes tú en el dashboard de Render
       - key: FRIEND_NUMBER
         sync: false        # ej: 5491123456789 (sin + ni espacios)
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=192
+      - key: LOW_MEMORY
+        value: "1"
     disk:
       name: wwebjs-auth
       mountPath: /tmp/wwebjs_auth
