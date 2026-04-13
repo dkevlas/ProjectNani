@@ -1,4 +1,4 @@
-const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
+const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode");
 const express = require("express");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
@@ -38,37 +38,47 @@ let initInFlight = false;
 let initAttempts = 0;
 
 // Buffer de mensajes pendientes: { texts: [], audioBase64s: [], timer }
-let pending = { texts: [], audioBase64s: [], timer: null };
+let pending = { texts: [], audioFiles: [], timer: null };
+const TEMP_AUDIO_DIR = process.env.TEMP_AUDIO_DIR || "/tmp/wwebjs_audio";
 
 // ── WhatsApp client ───────────────────────────────────────────────────────
 const client = createWhatsAppClient();
 registerWhatsAppHandlers(client);
 
 function createWhatsAppClient() {
+  const args = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-sync",
+    "--disable-translate",
+    "--metrics-recording-only",
+    "--mute-audio",
+    "--hide-scrollbars",
+    "--disable-site-isolation-trials",
+    "--renderer-process-limit=1",
+    "--blink-settings=imagesEnabled=false",
+    "--disable-features=TranslateUI,BackForwardCache,AcceptCHFrame,MediaRouter,IsolateOrigins,site-per-process",
+  ];
+
+  if (process.env.LOW_MEMORY !== "0") {
+    args.push("--single-process", "--no-zygote", "--disable-software-rasterizer");
+  }
+
   return new Client({
     authStrategy: new LocalAuth({ dataPath: WWEBJS_AUTH_PATH }),
     puppeteer: {
       headless: true,
       ...(CHROME_EXECUTABLE_PATH ? { executablePath: CHROME_EXECUTABLE_PATH } : {}),
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-extensions",
-        "--disable-background-networking",
-        "--disable-background-timer-throttling",
-        "--disable-renderer-backgrounding",
-        "--disable-backgrounding-occluded-windows",
-        "--disable-sync",
-        "--disable-translate",
-        "--metrics-recording-only",
-        "--mute-audio",
-        "--hide-scrollbars",
-        "--disable-features=TranslateUI,BackForwardCache,AcceptCHFrame,MediaRouter",
-      ],
+      args,
     },
   });
 }
@@ -234,12 +244,43 @@ async function tryAccumulateAudio(msg) {
   try {
     const media = await msg.downloadMedia();
     if (media) {
-      pending.audioBase64s.push({ data: media.data, mimetype: media.mimetype });
-      console.log("🎤 Audio acumulado");
+      const entry = persistAudioToDisk(media.data, media.mimetype);
+      if (entry) {
+        pending.audioFiles.push(entry);
+        console.log("🎤 Audio acumulado (disk)");
+      } else {
+        console.log("🎤 Audio recibido pero se omitió (no se pudo guardar)");
+      }
     }
   } catch (e) {
     console.error("Error descargando audio:", e.message);
   }
+}
+
+function persistAudioToDisk(base64Data, mimetype) {
+  try {
+    fs.mkdirSync(TEMP_AUDIO_DIR, { recursive: true });
+    const ext = guessAudioExtension(mimetype);
+    const filePath = path.join(
+      TEMP_AUDIO_DIR,
+      `audio_${Date.now()}_${Math.random().toString(16).slice(2)}.${ext}`,
+    );
+    fs.writeFileSync(filePath, Buffer.from(base64Data, "base64"));
+    return { filePath, mimetype };
+  } catch (e) {
+    console.error("Error guardando audio en disco:", e?.message || e);
+    return null;
+  }
+}
+
+function guessAudioExtension(mimetype) {
+  const m = String(mimetype || "").toLowerCase();
+  if (m.includes("ogg")) return "ogg";
+  if (m.includes("opus")) return "opus";
+  if (m.includes("mpeg") || m.includes("mp3")) return "mp3";
+  if (m.includes("wav")) return "wav";
+  if (m.includes("mp4") || m.includes("m4a")) return "m4a";
+  return "bin";
 }
 
 function resetDebounceTimer(lastMsg) {
@@ -252,15 +293,16 @@ function resetDebounceTimer(lastMsg) {
 // ── Procesar y responder ──────────────────────────────────────────────────
 async function processAndReply(lastMsg) {
   const texts = [...pending.texts];
-  const audios = [...pending.audioBase64s];
-  pending = { texts: [], audioBase64s: [], timer: null };
+  const audios = [...pending.audioFiles];
+  pending = { texts: [], audioFiles: [], timer: null };
 
   const parts = [];
 
   // Transcribir audios con Gemini
   for (const audio of audios) {
     try {
-      const transcription = await transcribeAudio(audio.data, audio.mimetype);
+      const base64Data = fs.readFileSync(audio.filePath, { encoding: "base64" });
+      const transcription = await transcribeAudio(base64Data, audio.mimetype);
       if (transcription) {
         parts.push(`[Audio transcrito]: ${transcription}`);
         console.log(`🎤 Transcripción: ${transcription}`);
@@ -268,6 +310,10 @@ async function processAndReply(lastMsg) {
     } catch (e) {
       console.error("Error transcribiendo:", e.message);
       parts.push("[Audio recibido — no se pudo transcribir]");
+    } finally {
+      try {
+        fs.unlinkSync(audio.filePath);
+      } catch {}
     }
   }
 
