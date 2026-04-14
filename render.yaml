@@ -12,3 +12,5 @@ services:
         sync: false        # ej: 5491123456789 (sin + ni espacios)
       - key: NODE_OPTIONS
         value: --max-old-space-size=320
+      - key: PUPPETEER_CACHE_DIR
+        value: /opt/render/project/src/.cache/puppeteer
