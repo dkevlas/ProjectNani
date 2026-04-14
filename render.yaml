@@ -3,7 +3,7 @@ services:
     name: whatsapp-ai-bot
     env: node
     plan: free
-    buildCommand: npm install && npx puppeteer browsers install chrome
+    buildCommand: export PUPPETEER_CACHE_DIR=/opt/render/project/src/.cache/puppeteer && npm install && npx puppeteer browsers install chrome && ls -la /opt/render/project/src/.cache/puppeteer/chrome
     startCommand: node index.js
     envVars:
       - key: GEMINI_API_KEY
