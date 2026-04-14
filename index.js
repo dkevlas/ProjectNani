@@ -22,6 +22,7 @@ const genAI = new GoogleGenerativeAI(api_key);
 const wait = 10;
 
 const FRIEND_NUMBER = process.env.FRIEND_NUMBER || "51922912558";
+const FRIEND_NAME = process.env.FRIEND_NAME || "";
 const DEBOUNCE_MS = wait * 1000;
 
 const MODEL_TEXT = process.env.GEMINI_TEXT_MODEL || "gemini-2.5-flash";
@@ -40,6 +41,13 @@ let startingSocket = false;
 
 let pending = { texts: [], audioFiles: [], timer: null };
 const TEMP_AUDIO_DIR = process.env.TEMP_AUDIO_DIR || "/tmp/baileys_audio";
+
+const INBOX_MAX = 50;
+const inbox = [];
+function recordInbox(entry) {
+  inbox.unshift(entry);
+  if (inbox.length > INBOX_MAX) inbox.length = INBOX_MAX;
+}
 
 const logger = pino({ level: process.env.BAILEYS_LOG_LEVEL || "silent" });
 
@@ -142,15 +150,44 @@ async function handleIncomingMessage(msg) {
   const from = msg.key.remoteJid;
   if (!from || from.endsWith("@g.us") || from.endsWith("@broadcast")) return;
 
+  const fromAlt = msg.key.remoteJidAlt || msg.key.senderPn || null;
   const senderNumber = normalizeJid(from);
+  const senderAlt = fromAlt ? normalizeJid(fromAlt) : null;
+  const pushName = msg.pushName || "";
   const type = detectMessageType(msg.message);
   const body = extractText(msg.message);
 
-  console.log("MENSAJE ENTRANTE:", from, type, body || "");
-  console.log("Número limpio:", senderNumber);
-  console.log("FRIEND_NUMBER:", FRIEND_NUMBER);
-  if (senderNumber !== String(FRIEND_NUMBER)) {
-    console.log("⛔ Ignorado: no es FRIEND_NUMBER");
+  console.log("MENSAJE ENTRANTE:", from, "alt:", fromAlt || "—", `pushName: "${pushName}"`, type, body || "");
+  console.log("Número limpio:", senderNumber, senderAlt ? `(alt: ${senderAlt})` : "");
+  console.log("FRIEND_NUMBER:", FRIEND_NUMBER, FRIEND_NAME ? `· FRIEND_NAME: "${FRIEND_NAME}"` : "");
+
+  const allowed = String(FRIEND_NUMBER)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const matchesNumber =
+    allowed.includes(senderNumber) ||
+    (senderAlt && allowed.includes(senderAlt));
+
+  const matchesName =
+    FRIEND_NAME && pushName.trim().toLowerCase() === FRIEND_NAME.trim().toLowerCase();
+
+  const passed = matchesNumber || matchesName;
+  recordInbox({
+    at: new Date().toISOString(),
+    jid: from,
+    jidAlt: fromAlt,
+    number: senderNumber,
+    numberAlt: senderAlt,
+    pushName,
+    type,
+    preview: (body || "").slice(0, 80),
+    passed,
+  });
+
+  if (!passed) {
+    console.log("⛔ Ignorado: no es FRIEND_NUMBER ni FRIEND_NAME");
     return;
   }
 
@@ -358,6 +395,49 @@ app.get("/pause", (req, res) => {
 });
 
 app.get("/ping", (req, res) => res.send("pong"));
+app.get("/inbox", (req, res) => {
+  const rows = inbox
+    .map((e) => {
+      const time = new Date(e.at).toLocaleString("es-PE", { timeZone: "America/Lima" });
+      const tag = e.passed
+        ? '<span style="color:#6abf6a">✓ respondido</span>'
+        : '<span style="color:#c9a96e">⛔ ignorado</span>';
+      const escape = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;",
+      }[c]));
+      return `<tr>
+        <td style="padding:8px;border-bottom:1px solid #222;white-space:nowrap">${escape(time)}</td>
+        <td style="padding:8px;border-bottom:1px solid #222">${escape(e.pushName)}</td>
+        <td style="padding:8px;border-bottom:1px solid #222"><code>${escape(e.number)}</code>${e.jid.endsWith("@lid") ? ' <span style="color:#888">(lid)</span>' : ""}</td>
+        <td style="padding:8px;border-bottom:1px solid #222"><code>${escape(e.numberAlt || "—")}</code></td>
+        <td style="padding:8px;border-bottom:1px solid #222">${escape(e.type)}</td>
+        <td style="padding:8px;border-bottom:1px solid #222">${escape(e.preview)}</td>
+        <td style="padding:8px;border-bottom:1px solid #222">${tag}</td>
+      </tr>`;
+    })
+    .join("");
+
+  res.send(`<!DOCTYPE html>
+<html lang="es"><head><meta charset="UTF-8"><title>Inbox</title>
+<style>
+  body{background:#0d0d0f;color:#f0ebe3;font-family:-apple-system,sans-serif;margin:0;padding:24px}
+  h1{font-weight:400;font-size:20px;margin:0 0 16px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;padding:8px;border-bottom:1px solid #333;color:#888;font-weight:400}
+  code{background:#1a1a1a;padding:2px 6px;border-radius:3px;font-size:12px}
+  a{color:#c9a96e}
+</style>
+<script>setTimeout(()=>location.reload(),5000)</script>
+</head><body>
+<h1>Últimos ${inbox.length}/${INBOX_MAX} mensajes · <a href="/">volver</a> · auto-refresh 5s</h1>
+<table>
+  <thead><tr>
+    <th>Hora</th><th>pushName</th><th>Número/LID</th><th>Alt</th><th>Tipo</th><th>Vista previa</th><th>Estado</th>
+  </tr></thead>
+  <tbody>${rows || '<tr><td colspan="7" style="padding:24px;color:#555;text-align:center">Sin mensajes aún</td></tr>'}</tbody>
+</table>
+</body></html>`);
+});
 app.get("/status", (req, res) => {
   const payload = {
     ready: isReady,
