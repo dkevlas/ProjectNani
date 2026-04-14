@@ -3,22 +3,12 @@ services:
     name: whatsapp-ai-bot
     env: node
     plan: free
-    buildCommand: npm install
+    buildCommand: npm install && npx puppeteer browsers install chrome
     startCommand: node index.js
     envVars:
       - key: GEMINI_API_KEY
-        sync: false
+        sync: false        # lo escribes tú en el dashboard de Render
       - key: FRIEND_NUMBER
-        sync: false
+        sync: false        # ej: 5491123456789 (sin + ni espacios)
       - key: NODE_OPTIONS
-        value: --max-old-space-size=256
-      - key: LOW_MEMORY
-        value: "1"
-      - key: PUPPETEER_SKIP_DOWNLOAD
-        value: "true"
-      - key: CHROME_BIN
-        value: /usr/bin/chromium
-    disk:
-      name: wwebjs-auth
-      mountPath: /tmp/wwebjs_auth
-      sizeGB: 1
+        value: --max-old-space-size=320
