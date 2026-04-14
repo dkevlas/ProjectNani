@@ -149,7 +149,10 @@ async function handleIncomingMessage(msg) {
   console.log("MENSAJE ENTRANTE:", from, type, body || "");
   console.log("Número limpio:", senderNumber);
   console.log("FRIEND_NUMBER:", FRIEND_NUMBER);
-  // if (senderNumber !== String(FRIEND_NUMBER)) return;
+  if (senderNumber !== String(FRIEND_NUMBER)) {
+    console.log("⛔ Ignorado: no es FRIEND_NUMBER");
+    return;
+  }
 
   console.log(`📨 Mensaje recibido — tipo: ${type}`);
 
