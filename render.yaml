@@ -10,3 +10,5 @@ services:
         sync: false
       - key: FRIEND_NUMBER
         sync: false
+      - key: FRIEND_NAME
+        sync: false
