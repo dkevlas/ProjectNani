@@ -63,15 +63,9 @@ function createWhatsAppClient() {
     "--metrics-recording-only",
     "--mute-audio",
     "--hide-scrollbars",
-    "--disable-site-isolation-trials",
-    "--renderer-process-limit=1",
-    "--blink-settings=imagesEnabled=false",
-    "--disable-features=TranslateUI,BackForwardCache,AcceptCHFrame,MediaRouter,IsolateOrigins,site-per-process",
+    "--disable-software-rasterizer",
+    "--disable-features=TranslateUI,BackForwardCache,AcceptCHFrame,MediaRouter",
   ];
-
-  if (process.env.LOW_MEMORY !== "0") {
-    args.push("--single-process", "--no-zygote", "--disable-software-rasterizer");
-  }
 
   return new Client({
     authStrategy: new LocalAuth({ dataPath: WWEBJS_AUTH_PATH }),
