@@ -1,18 +1,19 @@
 {
   "name": "whatsapp-ai-bot",
-  "version": "2.0.0",
-  "description": "Bot de WhatsApp con Gemini AI — texto + audios + debounce",
+  "version": "3.0.0",
+  "description": "Bot de WhatsApp con Gemini AI — Baileys (sin Chromium) + texto + audios + debounce",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.15.0",
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.9",
     "dotenv": "^17.4.2",
     "express": "^4.18.2",
-    "puppeteer": "^24.31.0",
-    "qrcode": "^1.5.3",
-    "whatsapp-web.js": "^1.23.0"
+    "pino": "^9.5.0",
+    "qrcode": "^1.5.3"
   },
   "engines": {
     "node": ">=18.0.0 <23.0.0"
