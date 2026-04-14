@@ -1,4 +1,12 @@
-const { Client, LocalAuth } = require("whatsapp-web.js");
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason,
+  downloadMediaMessage,
+  fetchLatestBaileysVersion,
+} = require("@whiskeysockets/baileys");
+const { Boom } = require("@hapi/boom");
+const pino = require("pino");
 const qrcode = require("qrcode");
 const express = require("express");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
@@ -6,252 +14,195 @@ const fs = require("fs");
 const path = require("path");
 const http = require("http");
 const https = require("https");
-require('dotenv').config()
+require("dotenv").config();
 
 const app = express();
-const api_key = process.env.GEMINI_API_KEY
+const api_key = process.env.GEMINI_API_KEY;
 const genAI = new GoogleGenerativeAI(api_key);
-const wait = 10
+const wait = 10;
 
-// ── Configura aquí el número de tu amiga ─────────────────────────────────
-// Formato: código de país + número, sin +, sin espacios. Ej: "5491123456789"
-const FRIEND_NUMBER = process.env.FRIEND_NUMBER || 51922912558;
-const DEBOUNCE_MS = wait * 1000; // 20 segundos de silencio antes de responder
-// ─────────────────────────────────────────────────────────────────────────
+const FRIEND_NUMBER = process.env.FRIEND_NUMBER || "51922912558";
+const DEBOUNCE_MS = wait * 1000;
 
 const MODEL_TEXT = process.env.GEMINI_TEXT_MODEL || "gemini-2.5-flash";
 const MODEL_AUDIO_TRANSCRIBE = process.env.GEMINI_TRANSCRIBE_MODEL || MODEL_TEXT;
-const WWEBJS_AUTH_PATH = process.env.WWEBJS_AUTH_PATH || "/tmp/wwebjs_auth";
+const AUTH_DIR = process.env.BAILEYS_AUTH_DIR || "/tmp/baileys_auth";
 const KEEP_ALIVE_URL = process.env.KEEP_ALIVE_URL;
 const KEEP_ALIVE_INTERVAL_MS = Number(process.env.KEEP_ALIVE_INTERVAL_MS || 10 * 60 * 1000);
-const CHROME_EXECUTABLE_PATH =
-  process.env.PUPPETEER_EXECUTABLE_PATH ||
-  process.env.CHROME_BIN ||
-  process.env.CHROME_PATH ||
-  resolveChromeExecutablePath();
 
+let sock = null;
 let qrImageBase64 = null;
 let isReady = false;
 let botActive = true;
 let lastInitError = null;
-let initInFlight = false;
 let initAttempts = 0;
+let startingSocket = false;
 
-// Buffer de mensajes pendientes: { texts: [], audioBase64s: [], timer }
 let pending = { texts: [], audioFiles: [], timer: null };
-const TEMP_AUDIO_DIR = process.env.TEMP_AUDIO_DIR || "/tmp/wwebjs_audio";
+const TEMP_AUDIO_DIR = process.env.TEMP_AUDIO_DIR || "/tmp/baileys_audio";
 
-// ── WhatsApp client ───────────────────────────────────────────────────────
-const client = createWhatsAppClient();
-registerWhatsAppHandlers(client);
+const logger = pino({ level: process.env.BAILEYS_LOG_LEVEL || "silent" });
 
-function createWhatsAppClient() {
-  const args = [
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--disable-extensions",
-    "--disable-background-networking",
-    "--disable-background-timer-throttling",
-    "--disable-renderer-backgrounding",
-    "--disable-backgrounding-occluded-windows",
-    "--disable-sync",
-    "--disable-translate",
-    "--metrics-recording-only",
-    "--mute-audio",
-    "--hide-scrollbars",
-    "--disable-software-rasterizer",
-    "--disable-features=TranslateUI,BackForwardCache,AcceptCHFrame,MediaRouter",
-  ];
+async function startSocket(trigger) {
+  if (startingSocket) return;
+  startingSocket = true;
+  initAttempts += 1;
+  const attempt = initAttempts;
+  console.log(`🔄 Inicializando WhatsApp (intento ${attempt}) — trigger: ${trigger}`);
 
-  return new Client({
-    authStrategy: new LocalAuth({ dataPath: WWEBJS_AUTH_PATH }),
-    puppeteer: {
-      headless: true,
-      ...(CHROME_EXECUTABLE_PATH ? { executablePath: CHROME_EXECUTABLE_PATH } : {}),
-      args,
-    },
-  });
-}
-
-function resolveChromeExecutablePath() {
-  const candidates = [
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-    "/usr/bin/google-chrome",
-    "/usr/bin/google-chrome-stable",
-  ];
-
-  for (const candidate of candidates) {
-    try {
-      if (fs.existsSync(candidate)) return candidate;
-    } catch {}
-  }
-
-  return undefined;
-}
-
-function logPuppeteerDebug(label) {
-  const envKeys = [
-    "NODE_ENV",
-    "NODE_VERSION",
-    "PUPPETEER_CACHE_DIR",
-    "PUPPETEER_EXECUTABLE_PATH",
-    "PUPPETEER_SKIP_DOWNLOAD",
-    "CHROME_BIN",
-    "CHROME_PATH",
-  ];
-
-  const envSnapshot = {};
-  for (const k of envKeys) envSnapshot[k] = process.env[k];
-
-  console.log("pptr-debug:", {
-    label,
-    node: process.version,
-    platform: `${process.platform}/${process.arch}`,
-    cwd: process.cwd(),
-    dir: __dirname,
-    chromeExecutablePath: CHROME_EXECUTABLE_PATH,
-    chromePathExists: CHROME_EXECUTABLE_PATH ? safeExists(CHROME_EXECUTABLE_PATH) : false,
-    env: envSnapshot,
-    cacheDirExists: safeExists(path.join(__dirname, ".cache")),
-    cachePuppeteerDirExists: safeExists(path.join(__dirname, ".cache", "puppeteer")),
-    cacheDirList: safeListDir(path.join(__dirname, ".cache")),
-    cachePuppeteerDirList: safeListDir(path.join(__dirname, ".cache", "puppeteer")),
-    puppeteerPackage: safeReadJsonVersion("puppeteer"),
-    puppeteerCorePackage: safeReadJsonVersion("puppeteer-core"),
-    puppeteerExecutablePath: safePuppeteerExecutablePath(),
-  });
-}
-
-function safeExists(p) {
   try {
-    return fs.existsSync(p);
-  } catch {
-    return false;
-  }
-}
+    fs.mkdirSync(AUTH_DIR, { recursive: true });
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    const { version } = await fetchLatestBaileysVersion();
 
-function safeListDir(dir) {
-  try {
-    return fs.readdirSync(dir).slice(0, 50);
-  } catch (e) {
-    return `error: ${String(e?.message || e || "")}`;
-  }
-}
+    sock = makeWASocket({
+      version,
+      auth: state,
+      logger,
+      printQRInTerminal: false,
+      browser: ["DennisBot", "Chrome", "1.0.0"],
+      syncFullHistory: false,
+      markOnlineOnConnect: false,
+    });
 
-function safeReadJsonVersion(pkgName) {
-  try {
-    // eslint-disable-next-line import/no-dynamic-require, global-require
-    return require(`${pkgName}/package.json`).version;
-  } catch (e) {
-    return `error: ${String(e?.message || e || "")}`;
-  }
-}
+    sock.ev.on("creds.update", saveCreds);
 
-function safePuppeteerExecutablePath() {
-  try {
-    // eslint-disable-next-line import/no-dynamic-require, global-require
-    const puppeteer = require("puppeteer");
-    if (typeof puppeteer.executablePath === "function") return puppeteer.executablePath();
-    return "n/a";
-  } catch (e) {
-    return `error: ${String(e?.message || e || "")}`;
-  }
-}
+    sock.ev.on("connection.update", async (update) => {
+      const { connection, lastDisconnect, qr } = update;
 
-function registerWhatsAppHandlers(client) {
-  client.on("qr", async (qr) => {
-    console.log("QR generado — abre la URL en el navegador para escanearlo");
-    qrImageBase64 = await qrcode.toDataURL(qr);
-  });
+      if (qr) {
+        try {
+          qrImageBase64 = await qrcode.toDataURL(qr);
+          console.log("QR generado — abre la URL en el navegador para escanearlo");
+        } catch (e) {
+          console.error("Error generando imagen QR:", e.message);
+        }
+      }
 
-  client.on("ready", () => {
-    isReady = true;
-    qrImageBase64 = null;
+      if (connection === "open") {
+        isReady = true;
+        qrImageBase64 = null;
+        lastInitError = null;
+        initAttempts = 0;
+        console.log("✅ WhatsApp conectado y listo");
+      }
+
+      if (connection === "close") {
+        isReady = false;
+        qrImageBase64 = null;
+        const statusCode = lastDisconnect?.error instanceof Boom
+          ? lastDisconnect.error.output?.statusCode
+          : undefined;
+        const reasonText = `${statusCode ?? ""} ${lastDisconnect?.error?.message ?? ""}`.trim();
+        lastInitError = `disconnected: ${reasonText}`;
+        console.log("❌ Conexión cerrada:", reasonText);
+
+        startingSocket = false;
+        const loggedOut = statusCode === DisconnectReason.loggedOut;
+        if (loggedOut) {
+          try {
+            fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+          } catch {}
+        }
+        scheduleReconnect("close");
+      }
+    });
+
+    sock.ev.on("messages.upsert", async ({ messages, type }) => {
+      if (type !== "notify") return;
+      for (const msg of messages) {
+        try {
+          await handleIncomingMessage(msg);
+        } catch (e) {
+          console.error("Error en handleIncomingMessage:", e?.message || e);
+        }
+      }
+    });
+
     lastInitError = null;
-    initAttempts = 0;
-    console.log("✅ WhatsApp conectado y listo");
-  });
-
-  client.on("auth_failure", (message) => {
-    isReady = false;
-    qrImageBase64 = null;
-    lastInitError = `auth_failure: ${String(message || "")}`;
-    console.log("❌ Auth failure:", message);
-    safeDestroyClient("auth_failure");
-    scheduleClientInitialize("auth_failure");
-  });
-
-  client.on("disconnected", (reason) => {
-    isReady = false;
-    qrImageBase64 = null;
-    lastInitError = `disconnected: ${String(reason || "")}`;
-    console.log("❌ Desconectado:", reason);
-    safeDestroyClient("disconnected");
-    scheduleClientInitialize("disconnected");
-  });
-
-  client.on("message", handleIncomingMessage);
+  } catch (e) {
+    lastInitError = `startSocket failed: ${String(e?.message || e || "")}`;
+    console.error("❌ startSocket falló:", e?.stack || e?.message || e);
+    scheduleReconnect("start-error");
+  } finally {
+    startingSocket = false;
+  }
 }
 
-function safeDestroyClient(trigger) {
-  try {
-    Promise.resolve(client.destroy())
-      .then(() => console.log(`🧹 client.destroy() ok — trigger: ${trigger}`))
-      .catch((e) => console.error(`🧹 client.destroy() error — trigger: ${trigger}:`, e?.message || e));
-  } catch (e) {
-    console.error(`🧹 client.destroy() threw — trigger: ${trigger}:`, e?.message || e);
-  }
+function scheduleReconnect(trigger) {
+  const delay = Math.min(60_000, Math.max(2_000, initAttempts * 3_000));
+  setTimeout(() => startSocket(trigger), delay);
 }
 
 async function handleIncomingMessage(msg) {
-  console.log("MENSAJE ENTRANTE:", msg.from, msg.type, msg.body);
-  if (!botActive || msg.fromMe) return;
+  if (!msg.message) return;
+  if (msg.key.fromMe) return;
+  if (!botActive) return;
 
-  const senderNumber = normalizeWhatsAppSender(msg.from);
+  const from = msg.key.remoteJid;
+  if (!from || from.endsWith("@g.us") || from.endsWith("@broadcast")) return;
+
+  const senderNumber = normalizeJid(from);
+  const type = detectMessageType(msg.message);
+  const body = extractText(msg.message);
+
+  console.log("MENSAJE ENTRANTE:", from, type, body || "");
   console.log("Número limpio:", senderNumber);
   console.log("FRIEND_NUMBER:", FRIEND_NUMBER);
-  // if (senderNumber !== FRIEND_NUMBER) return;
+  // if (senderNumber !== String(FRIEND_NUMBER)) return;
 
-  console.log(`📨 Mensaje recibido — tipo: ${msg.type}`);
+  console.log(`📨 Mensaje recibido — tipo: ${type}`);
 
-  if (msg.type === "chat" && msg.body) {
-    pending.texts.push(msg.body);
+  if (type === "text" && body) {
+    pending.texts.push(body);
   }
 
-  if (msg.type === "ptt" || msg.type === "audio") {
+  if (type === "audio") {
     await tryAccumulateAudio(msg);
   }
 
   resetDebounceTimer(msg);
 }
 
-function normalizeWhatsAppSender(from) {
-  return from.replace(/@c\.us|@lid/g, "");
+function normalizeJid(jid) {
+  return String(jid).replace(/@s\.whatsapp\.net|@c\.us|@lid/g, "").split(":")[0];
+}
+
+function detectMessageType(message) {
+  if (message.conversation || message.extendedTextMessage) return "text";
+  if (message.audioMessage) return "audio";
+  if (message.imageMessage) return "image";
+  if (message.videoMessage) return "video";
+  return "other";
+}
+
+function extractText(message) {
+  return (
+    message.conversation ||
+    message.extendedTextMessage?.text ||
+    message.imageMessage?.caption ||
+    message.videoMessage?.caption ||
+    ""
+  );
 }
 
 async function tryAccumulateAudio(msg) {
   try {
-    const media = await msg.downloadMedia();
-    if (media) {
-      const entry = persistAudioToDisk(media.data, media.mimetype);
-      if (entry) {
-        pending.audioFiles.push(entry);
-        console.log("🎤 Audio acumulado (disk)");
-      } else {
-        console.log("🎤 Audio recibido pero se omitió (no se pudo guardar)");
-      }
+    const buffer = await downloadMediaMessage(msg, "buffer", {}, { logger, reuploadRequest: sock.updateMediaMessage });
+    const mimetype = msg.message.audioMessage?.mimetype || "audio/ogg";
+    const entry = persistAudioToDisk(buffer, mimetype);
+    if (entry) {
+      pending.audioFiles.push(entry);
+      console.log("🎤 Audio acumulado (disk)");
+    } else {
+      console.log("🎤 Audio recibido pero se omitió (no se pudo guardar)");
     }
   } catch (e) {
     console.error("Error descargando audio:", e.message);
   }
 }
 
-function persistAudioToDisk(base64Data, mimetype) {
+function persistAudioToDisk(buffer, mimetype) {
   try {
     fs.mkdirSync(TEMP_AUDIO_DIR, { recursive: true });
     const ext = guessAudioExtension(mimetype);
@@ -259,7 +210,7 @@ function persistAudioToDisk(base64Data, mimetype) {
       TEMP_AUDIO_DIR,
       `audio_${Date.now()}_${Math.random().toString(16).slice(2)}.${ext}`,
     );
-    fs.writeFileSync(filePath, Buffer.from(base64Data, "base64"));
+    fs.writeFileSync(filePath, buffer);
     return { filePath, mimetype };
   } catch (e) {
     console.error("Error guardando audio en disco:", e?.message || e);
@@ -284,7 +235,6 @@ function resetDebounceTimer(lastMsg) {
   }, DEBOUNCE_MS);
 }
 
-// ── Procesar y responder ──────────────────────────────────────────────────
 async function processAndReply(lastMsg) {
   const texts = [...pending.texts];
   const audios = [...pending.audioFiles];
@@ -292,7 +242,6 @@ async function processAndReply(lastMsg) {
 
   const parts = [];
 
-  // Transcribir audios con Gemini
   for (const audio of audios) {
     try {
       const base64Data = fs.readFileSync(audio.filePath, { encoding: "base64" });
@@ -311,7 +260,6 @@ async function processAndReply(lastMsg) {
     }
   }
 
-  // Añadir textos
   for (const t of texts) parts.push(t);
 
   if (parts.length === 0) return;
@@ -321,14 +269,13 @@ async function processAndReply(lastMsg) {
 
   try {
     const reply = await generateReply(combined);
-    await lastMsg.reply(reply);
+    await sock.sendMessage(lastMsg.key.remoteJid, { text: reply }, { quoted: lastMsg });
     console.log(`✉️  Respondido: ${reply}`);
   } catch (e) {
     console.error("Error generando respuesta:", e.message);
   }
 }
 
-// ── Transcribir audio con Gemini ──────────────────────────────────────────
 async function transcribeAudio(base64Data, mimetype) {
   const model = genAI.getGenerativeModel({ model: MODEL_AUDIO_TRANSCRIBE });
 
@@ -345,7 +292,6 @@ async function transcribeAudio(base64Data, mimetype) {
   return result.response.text().trim();
 }
 
-// ── Generar respuesta empática con Gemini ─────────────────────────────────
 async function generateReply(combinedMessages) {
   const model = genAI.getGenerativeModel({ model: MODEL_TEXT });
 
@@ -374,7 +320,6 @@ Responde SOLO con el texto del mensaje, sin explicaciones ni comillas.`;
   return result.response.text().trim();
 }
 
-// ── Web server ────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
   if (!isReady && !qrImageBase64) {
     return res.send(pageHTML("⏳ Iniciando...", "<p>Espera unos segundos y recarga.</p>", false));
@@ -451,6 +396,7 @@ function pageHTML(title, content, ready) {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🌐 Servidor en puerto ${PORT}`));
+
 process.on("unhandledRejection", (reason) => {
   lastInitError = `unhandledRejection: ${String(reason || "")}`;
   console.error("unhandledRejection:", reason);
@@ -460,34 +406,8 @@ process.on("uncaughtException", (err) => {
   console.error("uncaughtException:", err);
 });
 
-scheduleClientInitialize("boot");
+startSocket("boot");
 startKeepAlive();
-
-function scheduleClientInitialize(trigger) {
-  if (initInFlight) return;
-  initInFlight = true;
-  initAttempts += 1;
-  const attemptNumber = initAttempts;
-
-  const delayMs = Math.min(60_000, Math.max(1_000, attemptNumber * 5_000));
-  setTimeout(async () => {
-    try {
-      console.log(`🔄 Inicializando WhatsApp (intento ${attemptNumber}) — trigger: ${trigger}`);
-      if (process.env.PPTR_DEBUG === "1") logPuppeteerDebug(`before-initialize#${attemptNumber}`);
-      await client.initialize();
-      lastInitError = null;
-    } catch (e) {
-      lastInitError = `initialize failed: ${String(e?.message || e || "")}`;
-      console.error("❌ client.initialize() falló:", e?.stack || e?.message || e);
-      if (process.env.PPTR_DEBUG === "1") logPuppeteerDebug(`initialize-error#${attemptNumber}`);
-      initInFlight = false;
-      scheduleClientInitialize("retry");
-      return;
-    } finally {
-      initInFlight = false;
-    }
-  }, delayMs);
-}
 
 function startKeepAlive() {
   if (!KEEP_ALIVE_URL) return;
