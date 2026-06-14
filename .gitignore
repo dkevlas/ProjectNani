@@ -6,3 +6,6 @@ package-lock.json
 .env
 .env.test
 README.md
+
+trash/
+*.zip
